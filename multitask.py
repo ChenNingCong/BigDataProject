@@ -1,4 +1,3 @@
-from cgi import test
 import torch.utils
 from transformers import (
     BertModel,
@@ -11,8 +10,6 @@ from transformers import (
 from transformers.modeling_outputs import SequenceClassifierOutput
 from torch import nn
 import torch
-from scipy.stats import pearsonr
-from sklearn.metrics import mean_squared_error
 from torch.utils.data import Dataset, Sampler, BatchSampler, RandomSampler, DataLoader
 from typing import Dict, Iterator, List, Tuple, Optional, Any
 
