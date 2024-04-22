@@ -6,6 +6,7 @@ from transformers import (
     AutoTokenizer,
     TrainingArguments,
     Trainer,
+    get_constant_schedule_with_warmup
 )
 from transformers.modeling_outputs import SequenceClassifierOutput
 from torch import nn
@@ -96,6 +97,35 @@ class MultiTaskSequentialBatchSampler(Sampler):
             for sample in sampler:
                 yield (task_id, sample)   
 
+import random
+
+class MultiTaskRoundRobinSampler(Sampler):
+    def __init__(self, dataset : MultiTaskDataset, order : List[TaskId], batch_size : int, drop_last : bool):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.drop_last = drop_last
+        self.order = order
+    def __len__(self):
+        total = 0
+        for i in self.dataset.dataset_map:
+            total += len(self.dataset.dataset_map[i]) // self.batch_size
+        return total
+    def __iter__(self) -> Iterator[DatasetIndex]:
+        # we simply create a sampler for each task one by one 
+        # then sample with each sampler
+        m = self.dataset.dataset_map
+        samplers = [(task_id, iter(BatchSampler(RandomSampler(m[task_id]), self.batch_size, self.drop_last))) for task_id in self.order]
+        while len(samplers) > 0:
+            index = random.randrange(0, len(samplers))
+            task_id, sampler = samplers[index]
+            try:
+                sample = next(sampler)
+                yield (task_id, sample) 
+            except StopIteration:
+                samplers.pop(index)
+        return None
+            
+                  
 
 """
 A brief explanation of what happens here
@@ -162,14 +192,14 @@ def sentence_pair_collate_fn(data, isRegression = True):
 # """
 # Shift tensor and whatever into device
 # """
-# def to_device_collator(x):
-#     newx = {}
-#     for i in x:
-#         if hasattr(x[i], "to"):
-#             newx[i] = x[i].to(device)
-#         else:
-#             newx[i] = x[i]
-#     return newx
+def to_device_collator(x):
+    newx = {}
+    for i in x:
+        if hasattr(x[i], "to"):
+            newx[i] = x[i].to(device)
+        else:
+            newx[i] = x[i]
+    return newx
 
 def collate_fn(x):
     task_id, data = x
@@ -334,7 +364,94 @@ trainer = CustomTrainer(
     eval_dataset=all_dataset["dev"],
     compute_metrics=compute_metrics,
 )
-trainer.evaluate()
-trainer.train()
-trainer.evaluate()
 
+
+lr = 2e-5
+num_epochs = 4
+optimizers = {}
+lr_schedulers = {}
+num_warmup_steps = 200
+for task_id in ["sentiment_analysis", "paraphrase", "similarity"]:
+    optimizers[task_id] = torch.optim.AdamW(model.lmheaders[task_id].parameters(), lr)
+    # lr_schedulers[task_id] = get_linear_schedule_with_warmup(optimizers[task_id], num_warmup_steps, total_steps)
+    lr_schedulers[task_id] = get_constant_schedule_with_warmup(optimizers[task_id], num_warmup_steps)    
+
+model_optmizer = torch.optim.AdamW(model.bert.parameters(), lr=lr)
+model_lr_scheduler = get_constant_schedule_with_warmup(model_optmizer, num_warmup_steps) 
+
+def get_eval_dataloader(task_id : str) -> DataLoader:
+    eval_dataset = all_dataset["dev"][task_id]
+    def collate_wrapper(f):
+        def inner(x):
+            d = f(x)
+            d["task_id"] = task_id
+            return d
+        return inner
+    if task_id in ["sentiment_analysis"]:
+        return DataLoader(eval_dataset, batch_size=batch_size, collate_fn=collate_wrapper(single_sentence_collate_fn))
+    elif task_id in ['paraphrase']:
+        return DataLoader(eval_dataset, batch_size=batch_size, collate_fn=collate_wrapper(
+            lambda x : sentence_pair_collate_fn(x, isRegression=False)
+            ))
+    elif task_id in ['similarity']:
+        return DataLoader(eval_dataset, batch_size=batch_size, collate_fn=collate_wrapper(sentence_pair_collate_fn))
+    else:
+        assert False
+
+
+def compute_metrics(eval_preds, task_id):
+    metric = compute_metrics_dict[task_id]
+    if task_id == 'sentiment_analysis' or task_id == 'paraphrase':
+        logits, labels = eval_preds
+        predictions = np.argmax(logits, axis=-1)
+        return metric.compute(predictions=predictions, references=labels)
+    elif task_id == "similarity":
+        logits, labels = eval_preds
+        return metric.compute(predictions=logits, references=labels)
+    else:
+        assert False
+
+from tqdm.autonotebook import tqdm
+for epoch in range(num_epochs):
+    model.train()
+    for batch in tqdm(data_loader):
+        batch = to_device_collator(batch)
+        output = model(**batch)
+        loss = output.loss
+        loss.backward()
+        task_id = batch["task_id"]
+        optimizers[task_id].step()
+        model_optmizer.step()
+        lr_schedulers[task_id].step()
+        model_lr_scheduler.step()  
+    with torch.no_grad():
+        model.eval()
+        for task_id in ["sentiment_analysis", "paraphrase", "similarity"]:
+            total_loss = 0
+            logits = []
+            labels = []
+            loader = get_eval_dataloader(task_id)
+            for batch in tqdm(loader):
+                batch = to_device_collator(batch)
+                output = model(**batch)
+                total_loss += output.loss
+                logits.append(output.logits)
+                labels.append(batch["labels"])
+            total_loss /= len(loader)
+            logits = torch.cat(logits, dim=0)
+            labels = torch.cat(labels, dim=0) 
+            metric = compute_metrics((logits.detach().cpu().numpy(), labels.detach().cpu().numpy()), task_id)
+            print(f"{task_id} eval loss: {total_loss}, metric: {metric}")
+
+def test():
+    training_dataset = MultiTaskDataset(all_dataset["train"])
+    order = ["similarity", "sentiment_analysis", "paraphrase", ]
+    sampler = MultiTaskRoundRobinSampler(training_dataset, order = order, batch_size=16, drop_last=True)
+    return DataLoader(training_dataset, 
+                                batch_size=None, 
+                                sampler=sampler, 
+                                batch_sampler=None, 
+                                collate_fn=collate_fn)
+data_loader = test()
+for i in data_loader:
+    pass
