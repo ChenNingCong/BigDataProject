@@ -272,7 +272,8 @@ We define a torch Dataset, which is just a group of list.
 class MultiTaskDataset(Dataset):
     def __init__(self, dataset_map: Dict[TaskId, SingleTaskDataset]):
         self.dataset_map = dataset_map
-
+    def __len__(self):
+        return sum([len(ds) for ds in self.dataset_map.values()])
     def __getitem__(self, i: DatasetIndex):
         task_id, indices = i
         ds = self.dataset_map[task_id]
@@ -291,7 +292,7 @@ class MultiTaskSequentialBatchSampler(Sampler):
         dataset: MultiTaskDataset,
         order: List[TaskId],
         batch_size: int,
-        drop_last: bool,
+        drop_last: bool = True
     ):
         self.dataset = dataset
         self.batch_size = batch_size

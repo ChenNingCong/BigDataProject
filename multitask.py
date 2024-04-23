@@ -2,10 +2,7 @@ import torch.utils
 from transformers import (
     BertModel,
     BertPreTrainedModel,
-    AutoTokenizer,
-    TrainingArguments,
-    Trainer,
-    get_constant_schedule_with_warmup,
+    get_linear_schedule_with_warmup,
 )
 from transformers.modeling_outputs import SequenceClassifierOutput
 from torch.utils.data import DataLoader
@@ -105,13 +102,17 @@ lr = 2e-5
 num_epochs = 4
 optimizers = {}
 lr_schedulers = {}
-num_warmup_steps = 200
+batch_size = 16
 for task_id in all_task_ids:
     optimizers[task_id] = torch.optim.AdamW(model.lmheaders[task_id].parameters(), lr)
-    # lr_schedulers[task_id] = get_linear_schedule_with_warmup(optimizers[task_id], num_warmup_steps, total_steps)
-    lr_schedulers[task_id] = get_constant_schedule_with_warmup(
-        optimizers[task_id], num_warmup_steps
-    )
+    # in epoch, we will go through the each dataset once
+    # the steps in each epoch are then calculated as the length of the dataset divided by the batch size
+    total_steps = num_epochs * (len(training_dataset.dataset_map[task_id]) // batch_size)
+    num_warmup_steps = int(total_steps * 0.1)
+    lr_schedulers[task_id] = get_linear_schedule_with_warmup(optimizers[task_id], num_warmup_steps, total_steps)
+    # lr_schedulers[task_id] = get_constant_schedule_with_warmup(
+    #     optimizers[task_id], num_warmup_steps
+    # )
 
 model_optmizer = torch.optim.AdamW(model.bert.parameters(), lr=lr)
 model_lr_scheduler = get_constant_schedule_with_warmup(model_optmizer, num_warmup_steps)
@@ -149,8 +150,15 @@ A brief explanation of what happens here
 """
 
 order = ["similarity", "sentiment_analysis", "paraphrase"]
+"""
+Size of dataset :
+Similarity is 6000
+Paraphrase is 14000
+Sentiment is 9000
+"""
+
 sampler = MultiTaskSequentialBatchSampler(
-    training_dataset, order=order, batch_size=16, drop_last=True
+    training_dataset, order=order, batch_size=batch_size, drop_last=True
 )
 data_loader = DataLoader(
     training_dataset,
