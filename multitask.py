@@ -115,7 +115,9 @@ for task_id in all_task_ids:
     # )
 
 model_optmizer = torch.optim.AdamW(model.bert.parameters(), lr=lr)
-model_lr_scheduler = get_constant_schedule_with_warmup(model_optmizer, num_warmup_steps)
+total_steps = num_epochs * len(training_dataset)
+num_warmup_steps = int(total_steps * 0.1)
+model_lr_scheduler = get_linear_schedule_with_warmup(model_optmizer, num_warmup_steps, total_steps)
 
 
 def collate_fn(x):
