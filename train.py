@@ -10,6 +10,7 @@ for epoch in range(num_epochs):
         batch = to_device_collator(batch)
         output = model(**batch)
         optimizers[task_id].zero_grad()
+        model_optmizer.zero_grad()
         loss = output.loss
         loss.backward()
         task_id = batch["task_id"]
